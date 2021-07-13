@@ -74,6 +74,7 @@ int size(struct Queue* queue)
     return queue->size;
 }
 
+// TODO not ideal implementation since it creates a new array, iterator ?
 int* elements(struct Queue* queue)
 {
 	int* array = (int *) malloc(queue->size * sizeof(int));

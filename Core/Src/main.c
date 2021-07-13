@@ -26,9 +26,12 @@
 #include <string.h>
 #include <stdarg.h>
 #include<time.h>
+#include <math.h>
 #include "ssd1351.h"
 #include "fonts.h"
 #include "testimg.h"
+#include "snake_icon.h"
+#include "pong_icon.h"
 #include "queue.h"
 /* USER CODE END Includes */
 
@@ -72,9 +75,30 @@ uint32_t current = 0;
 #define JS_ZERO ((JS_MAX - JS_MIN) / 2)
 #define JS_TOLERANCE 20
 
+// view breakdown
+#define HEADER_BOTTOM 16
+#define FOOTER_TOP (127 - 16)
+
+enum View{
+	MENU,
+	SNAKE,
+	PONG
+} curr_view;
+
+// menu
+#define ICON_WIDTH 32
+#define ICON_HEIGHT 32
+#define ICON_PADDING 8
+
+int selected_icon_index = 0;
+
 // snake
 #define SN_UNIT 4
 #define SN_ROOM_SIZE (128 / SN_UNIT)
+#define SN_MIN_X 1
+#define SN_MAX_X (SN_ROOM_SIZE - 2)
+#define SN_MIN_Y ((HEADER_BOTTOM / SN_UNIT) + 1)
+#define SN_MAX_Y ((FOOTER_TOP / SN_UNIT) - 1)
 struct Queue* snake_body;
 
 int snake_x = 0;
@@ -84,8 +108,27 @@ int direction = 1; // [0-3]
 int fruit_x = 0;
 int fruit_y = 0;
 
-// TODO add header and footer to display
-// TODO add bounds to snake game
+// pong
+#define PG_UNIT 4
+#define PG_ROOM_SIZE (128 / PG_UNIT)
+#define PG_PADDLE_OFFSET 1
+#define PG_PADDLE_LENGTH 5
+#define PG_MIN_X 1
+#define PG_MAX_X (PG_ROOM_SIZE - 2)
+#define PG_MIN_Y ((HEADER_BOTTOM / PG_UNIT) + 1)
+#define PG_MAX_Y ((FOOTER_TOP / PG_UNIT) - 1)
+
+#define PG_SPEED 1
+
+struct Ball {
+	int x, y;
+	float direction;
+};
+struct Ball* pg_ball;
+int pg_paddle_player = 0;
+int pg_paddle_bot = 0;
+int pg_score = 0;
+
 // TODO refactor joystick handler
 
 
@@ -107,77 +150,428 @@ static uint32_t readAnalog2(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 void init() {
+    logSerial("Welcome to Gamelad v0.1!\r\n");
     SSD1351_Unselect();
     SSD1351_Init();
+    SSD1351_FillScreen(SSD1351_BLACK);
 
-    snake_x = 10;
-    snake_y = 10;
+    HAL_Delay(100);
 
-    snake_body = createQueue(SN_ROOM_SIZE * SN_ROOM_SIZE);
-    enqueue(snake_body, snake_x * SN_ROOM_SIZE + snake_y);
+    curr_view = MENU;
 
-    fruit_x = rand() % SN_ROOM_SIZE;
-    fruit_y = rand() % SN_ROOM_SIZE;
+    initStartup();
 
-    snprintf(send_buffer, BUFSIZE, "Init done!\r\n");
-    CDC_Transmit_FS(send_buffer, strlen(send_buffer));
+    HAL_Delay(100);
+
+    initHeader();
+
+    HAL_Delay(100);
+
+    logSerial("Init started!\r\n");
+
+    switch(curr_view) {
+    case MENU:
+    	initMenu();
+        logSerial("Init menu done\r\n");
+    	break;
+    case SNAKE:
+    	initSnake();
+        logSerial("Init snake done\r\n");
+    	break;
+    case PONG:
+    	initPong();
+        logSerial("Init pong done\r\n");
+    	break;
+    	snprintf(send_buffer, BUFSIZE, "Invalid view on init: %d\r\n", curr_view);
+    	logSerial(send_buffer);
+    }
+
+    HAL_Delay(100);
+
+    logSerial("Init done! :)\r\n");
+}
+
+void initStartup() { // TODO make pretty
+    logSerial("Startup started!\r\n");
+	SSD1351_WriteString(0, 0, "Gamelad v0.1", Font_16x26, SSD1351_COLOR565(255, 127, 0), SSD1351_BLACK);
+
+    HAL_Delay(3000);
+
+    SSD1351_FillScreen(SSD1351_BLACK);
+
+    strokeRect(0, HEADER_BOTTOM, 127, FOOTER_TOP - HEADER_BOTTOM, SSD1351_WHITE);
+
+    logSerial("Startup done!\r\n");
+}
+
+void initHeader() {
+    SSD1351_WriteString(0, 0, "Gamelad v0.1", Font_7x10, SSD1351_COLOR565(255, 127, 0), SSD1351_BLACK);
+}
+
+void initMenu() { // TODO implement to allow break into two / three rows
+	SSD1351_FillRectangle(1, HEADER_BOTTOM + 1, 127 - 2, FOOTER_TOP - HEADER_BOTTOM - 2, SSD1351_BLACK);
+
+	SSD1351_FillRectangle(0, FOOTER_TOP, 127, 127, SSD1351_BLACK);
+
+	SSD1351_DrawImage(ICON_PADDING, HEADER_BOTTOM + ICON_PADDING, 32, 32, (const uint16_t*)snake_icon);
+	SSD1351_DrawImage(2 * ICON_PADDING + ICON_WIDTH, HEADER_BOTTOM + ICON_PADDING, 32, 32, (const uint16_t*)pong_icon);
+
+	for(int i = 0; i < 6; i++) {
+		int x = ((i % 3) + 1) * ICON_PADDING + (i % 3) * ICON_WIDTH;
+		int y = ((i / 3) + 1 + (i / 3 > 0 ? 1 : 0)) * ICON_PADDING + (i / 3) * ICON_HEIGHT + HEADER_BOTTOM;
+		strokeRect(x, y, ICON_WIDTH, ICON_HEIGHT, SSD1351_RED);
+		if (selected_icon_index == i) {
+			SSD1351_FillRectangle(x - 1, y - 1, ICON_WIDTH + 2, 2, SSD1351_BLUE);
+			SSD1351_FillRectangle(x - 1, y + ICON_HEIGHT - 1, ICON_WIDTH + 2, 2, SSD1351_BLUE);
+
+			SSD1351_FillRectangle(x - 1, y + 1, 2, ICON_HEIGHT, SSD1351_BLUE);
+			SSD1351_FillRectangle(x + ICON_WIDTH - 1, y + 1, 2, ICON_HEIGHT, SSD1351_BLUE);
+		}
+	}
 
 
+	char *name;
+	switch(selected_icon_index) {
+	case 0:
+		name = "Snake";
+		break;
+	case 1:
+		name = "Pong";
+		break;
+	default:
+		name = "_";
+	}
+
+	snprintf(send_buffer, BUFSIZE, "Select game: %s", name);
+    SSD1351_WriteString(0, FOOTER_TOP + 4, send_buffer, Font_7x10, SSD1351_WHITE, SSD1351_BLACK);
+}
+
+void initSnake() {
+	SSD1351_FillRectangle(1, HEADER_BOTTOM + 1, 127 - 2, FOOTER_TOP - HEADER_BOTTOM - 2, SSD1351_BLACK);
+
+	SSD1351_FillRectangle(0, FOOTER_TOP, 127, 127, SSD1351_BLACK);
+
+	snake_x = 10;
+	snake_y = 10;
+
+	snake_body = createQueue(SN_ROOM_SIZE * SN_ROOM_SIZE);
+	enqueue(snake_body, snake_x * SN_ROOM_SIZE + snake_y);
+
+	renderBox(snake_x, snake_y, SSD1351_WHITE);
+
+	fruit_x = rand() % SN_ROOM_SIZE;
+	fruit_y = rand() % SN_ROOM_SIZE;
+
+	renderBox(fruit_x, fruit_y, SSD1351_RED);
+
+	snprintf(send_buffer, BUFSIZE, "Score: %d", size(snake_body));
+    SSD1351_WriteString(0, FOOTER_TOP + 4, send_buffer, Font_7x10, SSD1351_WHITE, SSD1351_BLACK);
+}
+
+void initPong() {
+	SSD1351_FillRectangle(1, HEADER_BOTTOM + 1, 127 - 2, FOOTER_TOP - HEADER_BOTTOM - 2, SSD1351_BLACK);
+
+	SSD1351_FillRectangle(0, FOOTER_TOP, 127, 127, SSD1351_BLACK);
+
+	pg_ball = (struct Ball*) malloc(sizeof(struct Ball));
+
+	pg_ball->x = 10 * PG_UNIT;
+	pg_ball->y = 10 * PG_UNIT;
+	pg_ball->direction = 2 * M_PI / 3;
+
+	pg_score = 0;
+
+    SSD1351_WriteString(0, FOOTER_TOP + 4, "Score:", Font_7x10, SSD1351_WHITE, SSD1351_BLACK);
+}
+
+void strokeRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) {
+	for(int cx = x; cx < x + w; cx++) {
+        SSD1351_DrawPixel(cx, y, color);
+        SSD1351_DrawPixel(cx, y + h - 1, color);
+    }
+
+    for(int cy = y; cy < y + h; cy++) {
+        SSD1351_DrawPixel(x, cy, color);
+        SSD1351_DrawPixel(x + w - 1, cy, color);
+    }
+}
+
+void logSerial(const char* message) {
+	snprintf(send_buffer, BUFSIZE, message);
+	CDC_Transmit_FS(send_buffer, strlen(send_buffer));
 }
 
 
 void loop() {
-    // Check border
-    SSD1351_FillScreen(SSD1351_BLACK);
-
-    for(int x = 0; x < SSD1351_WIDTH / 2; x++) {
-        SSD1351_DrawPixel(x, 0, SSD1351_RED);
-        SSD1351_DrawPixel(x, SSD1351_HEIGHT / 2 -1, SSD1351_RED);
-    }
-
-    for(int y = 0; y < SSD1351_HEIGHT / 2; y++) {
-        SSD1351_DrawPixel(0, y, SSD1351_RED);
-        SSD1351_DrawPixel(SSD1351_WIDTH / 2 -1, y, SSD1351_RED);
-    }
-
-    HAL_Delay(3000);
-
-    // Check fonts
-    SSD1351_FillScreen(SSD1351_BLACK);
-    SSD1351_WriteString(0, 0, "Font_7x10, red on black, lorem ipsum dolor sit amet", Font_7x10, SSD1351_RED, SSD1351_BLACK);
-    SSD1351_WriteString(0, 3*10, "Font_11x18, green, lorem ipsum", Font_11x18, SSD1351_GREEN, SSD1351_BLACK);
-    SSD1351_WriteString(0, 3*10+3*18, "Font_16x26, blue, lorem ipsum dolor sit amet", Font_16x26, SSD1351_BLUE, SSD1351_BLACK);
-
-    HAL_Delay(1000);
-    SSD1351_InvertColors(true);
-    HAL_Delay(1000);
-    SSD1351_InvertColors(false);
-
-    HAL_Delay(5000);
-
-    SSD1351_DrawImage(0, 0, 128, 128, (const uint16_t*)test_img_128x128);
-
-    // GET TIME
-    snprintf(send_buffer, BUFSIZE, "Current timestamp: %d\r\n", HAL_GetTick());
-    CDC_Transmit_FS(send_buffer, strlen(send_buffer));
-    // END GET TIME
-
-    HAL_Delay(10000);
+  switch(curr_view) {
+  case MENU:
+	menuLoop();
+	break;
+  case SNAKE:
+	snakeLoop();
+	break;
+  case PONG:
+	pongLoop();
+	break;
+	// TODO default handler - log error
+  }
 }
 
-void renderBox(x, y)
+void snakeLoop() {
+	uint32_t analogValue = readAnalog();
+	uint32_t analogValue2 = readAnalog2();
+
+	if (analogValue < JS_ZERO - JS_TOLERANCE && direction != 1)
+	{
+	  direction = 3;
+	} else if (analogValue > JS_ZERO + JS_TOLERANCE && direction != 3)
+	{
+	  direction = 1;
+	} else if (analogValue2 > JS_ZERO + JS_TOLERANCE && direction != 2)
+	{
+	  direction = 0;
+	} else if (analogValue2 < JS_ZERO - JS_TOLERANCE && direction != 0)
+	{
+	  direction = 2;
+	}
+
+	if (direction == 0) {
+	  snake_y -= 1;
+	  if (snake_y < SN_MIN_Y) {
+		  snake_y = SN_MAX_Y;
+	  }
+	} else if (direction == 1) {
+	  snake_x += 1;
+	  if (snake_x > SN_MAX_X) {
+		  snake_x = SN_MIN_X;
+	  }
+	} else if (direction == 2) {
+	  snake_y += 1;
+	  if (snake_y > SN_MAX_Y) {
+		  snake_y = SN_MIN_Y;
+	  }
+	} else if (direction == 3) {
+	  snake_x -= 1;
+	  if (snake_x < SN_MIN_X) {
+		  snake_x = SN_MAX_X;
+	  }
+	}
+
+	enqueue(snake_body, snake_x * SN_ROOM_SIZE + snake_y);
+
+	renderBox(snake_x, snake_y, SSD1351_WHITE);
+
+	if (snake_x == fruit_x && snake_y == fruit_y) {
+	  fruit_x = rand() % (SN_MAX_X - SN_MIN_X) + SN_MIN_X;
+	  fruit_y = rand() % (SN_MAX_Y - SN_MIN_Y) + SN_MIN_Y;
+
+	  renderBox(fruit_x, fruit_y, SSD1351_RED);
+	} else {
+	  int idx = dequeue(snake_body);
+	  int cx = idx / SN_ROOM_SIZE;
+	  int cy = idx % SN_ROOM_SIZE;
+
+	  renderBox(cx, cy, SSD1351_BLACK);
+	}
+
+	int hit_self = 0;
+	int* snake_parts = elements(snake_body);
+	for (int i = 0; i < size(snake_body) - 1; i++) {
+		  int x = snake_parts[i] / SN_ROOM_SIZE;
+		  int y = snake_parts[i] % SN_ROOM_SIZE;
+		  if (snake_x == x && snake_y == y) {
+			  hit_self = 1;
+			  break;
+		  }
+	}
+
+	if (hit_self == 1) {
+		initSnake();
+		// RESET SNAKE AND SCORE !!!!
+	}
+
+	snprintf(send_buffer, BUFSIZE, "Score: %d", size(snake_body));
+	SSD1351_WriteString(0, FOOTER_TOP + 4, send_buffer, Font_7x10, SSD1351_WHITE, SSD1351_BLACK);
+}
+
+void pongLoop() {
+
+	SSD1351_FillRectangle(pg_ball->x, pg_ball->y, PG_UNIT, PG_UNIT, SSD1351_BLACK);
+
+	SSD1351_FillRectangle((PG_MIN_X + PG_PADDLE_OFFSET) * PG_UNIT, (pg_paddle_player + PG_MIN_Y) * PG_UNIT, PG_UNIT, PG_PADDLE_LENGTH * PG_UNIT, SSD1351_BLACK);
+	SSD1351_FillRectangle((PG_MAX_X - PG_PADDLE_OFFSET) * PG_UNIT, (pg_paddle_bot + PG_MIN_Y) * PG_UNIT, PG_UNIT, PG_PADDLE_LENGTH * PG_UNIT, SSD1351_BLACK);
+
+	int direction = 0;
+	uint32_t analogValue2 = readAnalog2();
+	if (analogValue2 > JS_ZERO + JS_TOLERANCE)
+	{
+	  direction = -1;
+	} else if (analogValue2 < JS_ZERO - JS_TOLERANCE)
+	{
+	  direction = 1;
+	}
+
+	if ((direction < 0 && pg_paddle_player > 0) || (direction > 0 && pg_paddle_player < PG_MAX_Y - PG_MIN_Y - PG_PADDLE_LENGTH + 1)) {
+		pg_paddle_player += direction;
+	}
+
+	pg_ball->x = pg_ball->x + (PG_SPEED * PG_UNIT) * cos(pg_ball->direction);
+	pg_ball->y = pg_ball->y + (PG_SPEED * PG_UNIT) * sin(pg_ball->direction);
+
+	if (pg_ball->y >= PG_MAX_Y * PG_UNIT) {
+		pg_ball->direction *= -1;
+		pg_ball->y--;
+	} else if (pg_ball->y <= 17) {
+		pg_ball->direction *= -1;
+		pg_ball->y++;
+	}
+
+	int bot_diff = pg_ball->y - ((pg_paddle_bot + PG_MIN_Y + PG_PADDLE_LENGTH / 2) * PG_UNIT);
+
+	int bot_direction = bot_diff / abs(bot_diff);
+
+	if ((bot_direction < 0 && pg_paddle_bot > 0) || (bot_direction > 0 && pg_paddle_bot < PG_MAX_Y - PG_MIN_Y - PG_PADDLE_LENGTH + 1)) {
+		pg_paddle_bot += bot_direction;
+	}
+
+	int state = 0; // 0 - game, -1 - bot won, 1 - player won
+
+	if ((pg_ball->x <= (PG_MIN_X + PG_PADDLE_OFFSET + 2) * PG_UNIT) && (pg_ball->x <= (PG_MIN_X + PG_PADDLE_OFFSET + 1) * PG_UNIT)) {
+		if ((pg_ball->y >= (pg_paddle_player + PG_MIN_Y) * PG_UNIT) && (pg_ball->y <= (pg_paddle_player + PG_MIN_Y + PG_PADDLE_LENGTH) * PG_UNIT)) {
+			pg_ball->direction -= M_PI_2;
+			pg_ball->x+= PG_UNIT;
+		} else {
+			state = -1;
+		}
+	} else if ((pg_ball->x >= (PG_MAX_X - PG_PADDLE_OFFSET - 2) * PG_UNIT) && (pg_ball->x >= (PG_MAX_X - PG_PADDLE_OFFSET - 1) * PG_UNIT)) {
+		if ((pg_ball->y >= (pg_paddle_bot + PG_MIN_Y) * PG_UNIT) && (pg_ball->y <= (pg_paddle_bot + PG_MIN_Y + PG_PADDLE_LENGTH) * PG_UNIT)) {
+			pg_ball->direction -= M_PI_2;
+			pg_ball->x-= PG_UNIT;
+		} else {
+			state = 1;
+		}
+	}
+
+	SSD1351_FillRectangle(pg_ball->x, pg_ball->y, PG_UNIT, PG_UNIT, SSD1351_WHITE);
+
+	SSD1351_FillRectangle((PG_MIN_X + PG_PADDLE_OFFSET) * PG_UNIT, (pg_paddle_player + PG_MIN_Y) * PG_UNIT, PG_UNIT, PG_PADDLE_LENGTH * PG_UNIT, SSD1351_WHITE);
+	SSD1351_FillRectangle((PG_MAX_X - PG_PADDLE_OFFSET) * PG_UNIT, (pg_paddle_bot + PG_MIN_Y) * PG_UNIT, PG_UNIT, PG_PADDLE_LENGTH * PG_UNIT, SSD1351_WHITE);
+
+
+	if (state != 0) {
+		pg_score += state;
+
+		SSD1351_FillRectangle(pg_ball->x, pg_ball->y, PG_UNIT, PG_UNIT, SSD1351_BLACK);
+
+		pg_ball->x = 10 * PG_UNIT;
+		pg_ball->y = 10 * PG_UNIT;
+		pg_ball->direction = 2 * M_PI / 3;
+	}
+
+	snprintf(send_buffer, BUFSIZE, "Score: %3d", pg_score);
+	SSD1351_WriteString(0, FOOTER_TOP + 4, send_buffer, Font_7x10, SSD1351_WHITE, SSD1351_BLACK);
+}
+
+void menuLoop() {
+	uint32_t analogValue = readAnalog();
+	uint32_t analogValue2 = readAnalog2();
+
+	int prev_selected_icon_index = selected_icon_index;
+	int diff1 = abs(analogValue - JS_ZERO);
+	int diff2 = abs(analogValue2 - JS_ZERO);
+	if (diff1 > diff2) {
+		if (analogValue < JS_ZERO - JS_TOLERANCE && (selected_icon_index % 3) > 0)
+		{
+			selected_icon_index--;
+		} else if (analogValue > JS_ZERO + JS_TOLERANCE && (selected_icon_index % 3) < 2)
+		{
+			selected_icon_index++;
+		}
+	}
+	if (prev_selected_icon_index == selected_icon_index) {
+		if (analogValue2 > JS_ZERO + JS_TOLERANCE && (selected_icon_index / 3) > 0)
+		{
+			selected_icon_index -= 3;
+		} else if (analogValue2 < JS_ZERO - JS_TOLERANCE && (selected_icon_index / 3) < 1)
+		{
+			selected_icon_index += 3;
+		}
+	}
+
+	snprintf(send_buffer, BUFSIZE, "Icon index: %d -> %d \r\n", prev_selected_icon_index, selected_icon_index);
+	logSerial(send_buffer);
+
+	if(prev_selected_icon_index != selected_icon_index) {
+		logSerial("Updating menu");
+		// deselect prev
+		int x = ((prev_selected_icon_index % 3) + 1) * ICON_PADDING + (prev_selected_icon_index % 3) * ICON_WIDTH;
+		int y = ((prev_selected_icon_index / 3) + 1 + (prev_selected_icon_index / 3 > 0 ? 1 : 0)) * ICON_PADDING + (prev_selected_icon_index / 3) * ICON_HEIGHT + HEADER_BOTTOM;
+		SSD1351_FillRectangle(x - 1, y - 1, ICON_WIDTH + 2, 2, SSD1351_BLACK);
+		SSD1351_FillRectangle(x - 1, y + ICON_HEIGHT - 1, ICON_WIDTH + 2, 2, SSD1351_BLACK);
+
+		SSD1351_FillRectangle(x - 1, y + 1, 2, ICON_HEIGHT, SSD1351_BLACK);
+		SSD1351_FillRectangle(x + ICON_WIDTH - 1, y + 1, 2, ICON_HEIGHT, SSD1351_BLACK);
+
+		strokeRect(x, y, ICON_WIDTH, ICON_HEIGHT, SSD1351_RED);
+
+		// select curr
+		x = ((selected_icon_index % 3) + 1) * ICON_PADDING + (selected_icon_index % 3) * ICON_WIDTH;
+		y = ((selected_icon_index / 3) + 1 + (selected_icon_index / 3 > 0 ? 1 : 0)) * ICON_PADDING + (selected_icon_index / 3) * ICON_HEIGHT + HEADER_BOTTOM;
+		SSD1351_FillRectangle(x - 1, y - 1, ICON_WIDTH + 2, 2, SSD1351_BLUE);
+		SSD1351_FillRectangle(x - 1, y + ICON_HEIGHT - 1, ICON_WIDTH + 2, 2, SSD1351_BLUE);
+
+		SSD1351_FillRectangle(x - 1, y + 1, 2, ICON_HEIGHT, SSD1351_BLUE);
+		SSD1351_FillRectangle(x + ICON_WIDTH - 1, y + 1, 2, ICON_HEIGHT, SSD1351_BLUE);
+
+
+		char *name;
+		switch(selected_icon_index) {
+		case 0:
+			name = "Snake";
+			break;
+		case 1:
+			name = "Pong";
+			break;
+		default:
+			name = "_";
+		}
+
+		SSD1351_FillRectangle(0, FOOTER_TOP, 127, 127, SSD1351_BLACK);
+		snprintf(send_buffer, BUFSIZE, "Select game: %s", name);
+	    SSD1351_WriteString(0, FOOTER_TOP + 4, send_buffer, Font_7x10, SSD1351_WHITE, SSD1351_BLACK);
+	}
+}
+
+void render() {
+	switch(curr_view) {
+	case MENU:
+		renderMenu();
+		break;
+	case SNAKE:
+		renderSnake();
+		break;
+	case PONG:
+		renderPong();
+		break;
+	// TODO default handler - log error
+	}
+}
+
+void renderMenu() {
+	SSD1351_FillRectangle(pg_ball->x, pg_ball->y, pg_ball->x + PG_UNIT, pg_ball->y + PG_UNIT, SSD1351_WHITE);
+}
+
+void renderBox(int x, int y, uint16_t color)
 {
 	for(int i = x * SN_UNIT; i < x * SN_UNIT + SN_UNIT; i++) {
 		for(int j = y * SN_UNIT; j < y * SN_UNIT + SN_UNIT; j++) {
-			SSD1351_DrawPixel(i, j, SSD1351_WHITE);
+			SSD1351_DrawPixel(i, j, color);
 		}
 	}
 }
 
-void render()
+void renderSnake()
 {
-    SSD1351_FillScreen(SSD1351_BLACK);
-
     int body_size = size(snake_body);
     int* body_elements = elements(snake_body);
     for(int i = 0; i < body_size; i++)
@@ -185,11 +579,15 @@ void render()
     	int idx = body_elements[i];
     	int cx = idx / SN_ROOM_SIZE;
     	int cy = idx % SN_ROOM_SIZE;
-    	renderBox(cx, cy);
+    	SSD1351_FillRectangle(cx, cy, cx + SN_UNIT, cy + SN_UNIT, SSD1351_WHITE);
     }
 
-    renderBox(fruit_x, fruit_y);
+	SSD1351_FillRectangle(fruit_x, fruit_y, fruit_x + SN_UNIT, fruit_y + SN_UNIT, SSD1351_RED);
 
+}
+
+void renderPong()
+{
 }
 
 /* USER CODE END 0 */
@@ -237,61 +635,41 @@ int main(void)
   init();
   while (1)
   {
-	  // loop();
+	  loop();
 
-	  uint32_t analogValue = readAnalog();
-	  uint32_t analogValue2 = readAnalog2();
+	  // render();
 
-	  if (analogValue < JS_ZERO - JS_TOLERANCE && direction != 1)
-	  {
-		  direction = 3;
-	  } else if (analogValue > JS_ZERO + JS_TOLERANCE && direction != 3)
-	  {
-		  direction = 1;
-	  } else if (analogValue2 < JS_ZERO - JS_TOLERANCE && direction != 2)
-	  {
-		  direction = 0;
-	  } else if (analogValue2 > JS_ZERO + JS_TOLERANCE && direction != 0)
-	  {
-		  direction = 2;
-	  }
-
-	  if (direction == 0) {
-		  snake_y -= 1;
-		  if (snake_y < 0) {
-			  snake_y = SN_ROOM_SIZE - 1;
-		  }
-	  } else if (direction == 1) {
-		  snake_x += 1;
-		  if (snake_x > SN_ROOM_SIZE - 1) {
-			  snake_x = 0;
-		  }
-	  } else if (direction == 2) {
-		  snake_y += 1;
-		  if (snake_y > SN_ROOM_SIZE - 1) {
-			  snake_y = 0;
-		  }
-	  } else if (direction == 3) {
-		  snake_x -= 1;
-		  if (snake_x < 0) {
-			  snake_x = SN_ROOM_SIZE - 1;
+	  if(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_4) == GPIO_PIN_SET) {
+		  switch (curr_view)  {
+		  case MENU:
+			  switch(selected_icon_index) {
+			  case 0:
+				  curr_view = SNAKE;
+				  initSnake();
+				  break;
+			  case 1:
+				  curr_view = PONG;
+				  initPong();
+				  break;
+			  default:
+				  snprintf(send_buffer, BUFSIZE, "Uncategorized option '%d'\r\n", selected_icon_index);
+				  logSerial(send_buffer);
+				  break;
+			  }
+			  break;
+		  case SNAKE:
+		  case PONG:
+			  curr_view = MENU;
+			  initMenu();
+			  break;
+		  default:
+			  break;
 		  }
 	  }
 
-	  enqueue(snake_body, snake_x * SN_ROOM_SIZE + snake_y);
 
-	  if (snake_x == fruit_x && snake_y == fruit_y) {
-		  fruit_x = rand() % SN_ROOM_SIZE;
-		  fruit_y = rand() % SN_ROOM_SIZE;
-	  } else {
-		  dequeue(snake_body);
-	  }
-
-	  render();
-
-
-	  snprintf(send_buffer, BUFSIZE, "Analog %d. X: %d, Y: %d \r\n", analogValue, snake_x, snake_y);
-	  CDC_Transmit_FS(send_buffer, strlen(send_buffer));
+	  //snprintf(send_buffer, BUFSIZE, "Analog %d. X: %d, Y: %d \r\n", analogValue, snake_x, snake_y);
+	  //CDC_Transmit_FS(send_buffer, strlen(send_buffer));
 
 	  HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
 	  HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_13);
@@ -302,15 +680,13 @@ int main(void)
 
 	  key_state = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_4); // External Key on PB4
 
-	  // HAL_GPIO
-
 	  snprintf(send_buffer, BUFSIZE, "Hello World [%d]: Key: %d \r\n", counter++, key_state);
 	  CDC_Transmit_FS(send_buffer, strlen(send_buffer));
 
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  HAL_Delay(500);
+	  HAL_Delay(100);
   }
   /* USER CODE END 3 */
 }
